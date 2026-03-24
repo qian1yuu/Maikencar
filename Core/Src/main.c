@@ -166,7 +166,7 @@ int main(void)
     Serial_Printf("Target:%.2f  Actual:%.2f  PWM:%d\r\n", motor_pwm, pwm_v_s, pwm);
     /*  控制频率（20ms一次，50Hz） */
     HAL_Delay(20);
-
+    HAL_Delay(20);
 
 
 
