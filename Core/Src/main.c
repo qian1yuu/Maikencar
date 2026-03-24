@@ -111,8 +111,8 @@ int main(void)
 
 
   // 启动中断
-  // HAL_TIM_IC_Start_IT(&htim1, TIM_CHANNEL_1);  // 启动单脉冲捕获中断
-  // HAL_TIM_Base_Start_IT(&htim3);               // 启动100ms定时中断
+  HAL_TIM_IC_Start_IT(&htim1, TIM_CHANNEL_1);  // 启动单脉冲捕获中断
+  HAL_TIM_Base_Start_IT(&htim3);               // 启动100ms定时中断
   //HAL_TIM_Base_Start_IT(&htim4);  // 启动TIM4中断
 
 
