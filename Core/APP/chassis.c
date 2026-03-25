@@ -1,55 +1,23 @@
-#include <stdint.h>
 #include "chassis.h"
-#include "Motor.h"
+#include <stdint.h>
 #include "Encoder.h"
-#include "PID.h"
+#include "Motor.h"
 #include "math.h"
-#include "elrs.h"
-
-/* ==================== PID参数配置 ==================== */
-#define SPEED_KP        1.0f
-#define SPEED_KI        2.0f
-#define SPEED_KD        0.5f
-#define MAX_PWM         75.0f  // PWM最大输出值（对应100%占空比）
-#define MAX_INTEGRAL    50.0f   // 积分限幅，防止积分饱和
 
 
 /* ==================== 全局变量 ==================== */
-static PID_Controller speed_pid;        // PID控制器实例
-float target_speed = 0.0f;   // 当前目标速度（带正负方向）
-static uint8_t current_pwm = 0;         // 当前实际输出的PWM值
+static PID_Controller speed_pid[4];  // 4个轮子独立PID
+float wheel_target_rps[4];           // 轮子目标转速(r/s)（带方向）
+float wheel_actual_rps[4];           // 轮子实际转速(r/s)
+int8_t wheel_dir[4];                 // 轮子方向（1正转/-1反转/0停止）
+uint8_t wheel_pwm[4];                // 轮子最终PWM值（0~75）
 
-// 目标 PWM（运动学算出来的）
-float motor_pwm = 0.0f;
-int8_t pwm;
-
-/////
-#define S       0.03f   // 轮子半径m
-#define A_PLUS_B 0.14f  // a+b 的值（轮子到旋转中心的距离，单位：m
-
-
-
-uint8_t PID_Update(void)
-{
-
-    float final_pwm = PID_Calculate(&speed_pid, motor_pwm, pwm_v_s);
-
-    // 限幅
-    if (final_pwm > 75)  final_pwm = 75;
-    if (final_pwm < -75) final_pwm = -75;
-
-    //调试的pwm值
-    pwm = (int8_t)final_pwm;
-
-    // 返回绝对值给驱动
-    return (uint8_t)fabs(final_pwm);
-}
-
-
-
-
-
-
+/* ==================== PID参数配置 ==================== */
+#define SPEED_KP        8.0f
+#define SPEED_KI        2.0f
+#define SPEED_KD        0.5f
+#define MAX_PWM         100.0f  // PWM最大输出值（对应100%占空比）
+#define MAX_INTEGRAL    50.0f   // 积分限幅，防止积分饱和
 
 
 
@@ -60,232 +28,137 @@ uint8_t PID_Update(void)
 */
 void Chassis_Init(void)
 {
-   PID_Init(&speed_pid, SPEED_KP, SPEED_KI, SPEED_KD, MAX_PWM, MAX_INTEGRAL);
-}
-
-
-// uint8_t PID_Update(void){
-//    // PID计算：输入目标速度和实际速度，返回调整量
-//
-//     // motor_pwm来自chassis.c，是当前输出的PWM值
-//
-//    float pid_out = PID_Calculate(&speed_pid, motor_pwm, pwm_v_s);
-//
-//
-//     // 速度平滑
-//     // static float last_pwm = 0.0f;
-//     // pwm = 0.8f * last_pwm + 0.2f * pid_out;
-//     // last_pwm = pwm;
-//
-//
-//
-//    // 基础PWM（根据目标速度开环计算）+ PID调整量
-//     pwm = pid_out;
-//
-//    // PWM限幅，确保在0-100之间
-//    if (pwm > 75) pwm = 75;
-//    if (pwm < 0) pwm = 0;
-//
-//     return (uint8_t)pwm;
-// }
-
-
-
-
-//////////////////////////
-///
-///2
-///2
-///2
-void Chassis_Task(uint8_t ctrl_enable, float vx, float vy, float vw){
-    // 步骤1：运动学算目标占空比 motor_pwm（你的核心目标值）
-    kinematics_forward(vx, vy, vw);
-
-    if (ctrl_enable == 0) {
-        Mecanum_Stop();
-        return;
-    }
-
-    // 步骤2：PID计算最终占空比（motor_pwm是目标，pwm_v_s是实际）
-    uint8_t duty  = PID_Update()/6; // duty是占空比绝对值，pwm是带正负的最终值
-
-    // 步骤3：方向由vx/vy/vw决定（不是pwm！），占空比用PID修正后的duty
-    if (fabs(vx) > 10.0f) {
-        if (vx > 0) { // 摇杆推前进 → 向前
-            Mecanum_Move_Forward(duty);
-        } else { // 摇杆推后退 → 向后
-            Mecanum_Move_Backward(duty);
-        }
-    } else if (fabs(vy) > 10.0f) {
-        if (vy < 0) { // 摇杆推左 → 左移
-            Mecanum_Move_Left(duty);
-        } else { // 摇杆推右 → 右移
-            Mecanum_Move_Right(duty);
-        }
-    } else if (fabs(vw) > 10.0f) {
-        if (vw < 0) { // 摇杆推左转 → 左转
-            Mecanum_Rotate_Left(duty);
-        } else { // 摇杆推右转 → 右转
-            Mecanum_Rotate_Right(duty);
-        }
-    } else {
-        Mecanum_Stop();
+    for (int i = 0; i < 4; i++) {
+        PID_Init(&speed_pid[i], SPEED_KP, SPEED_KI, SPEED_KD, MAX_PWM, MAX_INTEGRAL);
     }
 }
 
-
-
-
-
-
-
-
-
-
-// void Chassis_Task(uint8_t ctrl_enable, float vx, float vy, float vw){
-//     // 控制禁用时直接停止
-//     if (ctrl_enable == 0) {
-//         Mecanum_Stop();
-//         return;
-//     }
-//
-//     // 前进/后退 > 左移/右移 > 旋转
-//     if (fabs(vx) > 0.1) {
-//         // 前进/后退：直接使用摇杆值作为PWM
-//         uint8_t speed = (uint8_t)fabs(vx);
-//         if (speed > 75) speed = 75;
-//
-//         if (vx > 0) {
-//             Mecanum_Move_Forward(speed);
-//         } else {
-//             Mecanum_Move_Backward(speed);
-//         }
-//     } else if (fabs(vy) > 0.1) {
-//         // 左移/右移
-//         uint8_t speed = (uint8_t)fabs(vy);
-//         if (speed > 75) speed = 75;
-//
-//         if (vy < 0) {
-//             Mecanum_Move_Left(speed);
-//         } else {
-//             Mecanum_Move_Right(speed);
-//         }
-//     } else if (fabs(vw) > 0.1) {
-//         // 旋转
-//         uint8_t speed = (uint8_t)fabs(vw);
-//         if (speed > 75) speed = 75;
-//
-//         if (vw < 0) {
-//             Mecanum_Rotate_Left(speed);
-//         } else {
-//             Mecanum_Rotate_Right(speed);
-//         }
-//     } else {
-//         // 停止
-//         Mecanum_Stop();
-//     }
-// }
-
-
-
-// void Chassis_Task(uint8_t ctrl_enable, float vx, float vy, float vw){
-//
-//     kinematics_forward( vx, vy, vw);//计算四个轮子的角速度和电机pwm,taget
-//
-//     // 控制禁用时直接停止
-//     if (ctrl_enable == 0) {
-//         Mecanum_Stop();
-//         return;
-//     }
-//
-//
-//     // 前进/后退 > 左移/右移 > 旋转
-//     if (fabs(vx) > 0.1) {
-//         // 前进/后退
-//         if (vx > 0) {
-//             Mecanum_Move_Forward(pwm);
-//         } else {
-//             Mecanum_Move_Backward(pwm);
-//         }
-//     } else if (fabs(vy) > 0.1) {
-//         // 左移/右移
-//         if (vy < 0) {
-//             Mecanum_Move_Left(pwm);
-//         } else {
-//             Mecanum_Move_Right(pwm);
-//         }
-//     } else if (fabs(vw) > 0.1) {
-//         // 旋转
-//         if (vw < 0) {
-//             Mecanum_Rotate_Left(pwm);
-//         } else {
-//             Mecanum_Rotate_Right(pwm);
-//         }
-//     } else {
-//         // 停止
-//         Mecanum_Stop();
-//     }
-//
-// }
-
-
-
-
-
-// 倒向运动学：根据速度和角速度计算电机PWM值taget
-// 输入：vx, vy, vw
-// 输出：motor_pwm
-void kinematics_forward(float vx, float vy, float vw) {
-    // 公式：(1/s) * 矩阵 * [vx, vy, vw]^T = [ω0, ω1, ω2, ω3]^T
-
-    float motor_out[4];
-    float omega_out[4];
-
-    // -------------------------- 角速度公式 + 位置标注 --------------------------
-    omega_out[0] = (-1 * vx + 1 * vy + A_PLUS_B * vw) / S;  // 左上轮 角速度
-    omega_out[1] = (-1 * vx - 1 * vy + A_PLUS_B * vw) / S;  // 左下轮 角速度
-    omega_out[2] = (1 * vx - 1 * vy + A_PLUS_B * vw) / S;    // 右下轮 角速度
-    omega_out[3] = (1 * vx + 1 * vy + A_PLUS_B * vw) / S;    // 右上轮 角速度
-
-    // -------------------------- 转速公式 + 位置标注 --------------------------
-    motor_out[0] = omega_out[0] / 2 / 3.1415926f * 5;  // 左上轮 转速
-    motor_out[1] = omega_out[1] / 2 / 3.1415926f * 5;  // 左下轮 转速
-    motor_out[2] = omega_out[2] / 2 / 3.1415926f * 5;  // 右下轮 转速
-    motor_out[3] = omega_out[3] / 2 / 3.1415926f * 5;  // 右上轮 转速
-
-    motor_pwm = motor_out[0] / 308 * 75; // 计算出来的转速/最大转速*75占空比
-
-
-    // ====================== 关键修复：限幅 ======================
-    // 不让目标超过 ±75，否则PID永远满转
-    if(motor_pwm > 75) motor_pwm = 75;
-    if(motor_pwm < -75) motor_pwm = -75;
+uint8_t PID_Update(uint8_t idx, float target, float actual) {
+    float pid_out = PID_Calculate(&speed_pid[idx], target, actual);
+    // PWM限幅，确保0~75
+    pid_out = pid_out > MAX_PWM ? MAX_PWM : (pid_out < 0 ? 0 : pid_out);
+    return (uint8_t)pid_out;
 }
 
 
+/**
+ * @brief 麦克纳姆轮底盘运动学正解
+ * @功能 由底盘整体速度（摇杆输入）计算四个轮子的目标速度，保证正负（正反转）不变，且速度不超限
+ * @参数 vx: 底盘前后方向速度（摇杆值，范围-100~100）
+ * @参数 vy: 底盘左右方向速度（摇杆值，范围-100~100）
+ * @参数 vw: 底盘自转速度（摇杆值，范围-100~100）
+ * @参数 wheel[4]: 输出参数，存放四个轮子的最终速度，顺序为：
+ *        wheel[0] = 左上轮（左前轮）、wheel[1] = 右上轮（右前轮）
+ *        wheel[2] = 左下轮（左后轮）、wheel[3] = 右下轮（右后轮）
+ * @说明 1. 轮子速度正负决定正反转，正数/负数对应电机正转/反转
+ *       2. 所有轮子等比例缩放，保证底盘运动方向不偏移
+ */
+void kinematics_forward(float vx, float vy, float vw, float wheel[4]) {
 
 
+    // 第一步：基础速度计算（核心公式，正负保留，决定轮子正反转）
+    wheel[0] = vx + vy + vw;  // 左上轮速度公式
+    wheel[1] = vx - vy - vw;  // 右上轮速度公式
+    wheel[2] = vx - vy + vw;  // 左下轮速度公式
+    wheel[3] = vx + vy - vw;  // 右下轮速度公式
 
+    // 第二步：计算四个轮子速度的最大绝对值（仅关注速度大小，不关注方向）
+    float max_abs_speed = 0.0f;  // 初始化最大绝对值为0
+    for (int i = 0; i < 4; i++) {
+        // 取当前轮子速度的绝对值，和已记录的最大值比较，保留更大的那个
+        max_abs_speed = fmax(max_abs_speed, fabs(wheel[i]));
+    }
 
-
-
+    // 第三步：等比例缩放（仅当最大速度超过阈值时执行，保证方向不偏）
+    if (max_abs_speed > CODE_MAX_SPEED) {
+        // 计算缩放系数（0~1之间，保证所有轮子速度等比例缩小）
+        float scale = CODE_MAX_SPEED / max_abs_speed;
+        // 所有轮子按同一系数缩放，正负号保留（正反转不变）
+        for (int i = 0; i < 4; i++) {
+            wheel[i] *= scale;
+        }
+    }
+    // 若最大速度未超限，直接使用原始计算值，无需缩放
+}
 
 
 
 
 /**
-* @brief 获取当前底盘状态（用于调试）
-* @param target: 输出当前目标速度(m/s)
-* @param actual: 输出编码器测得的实际速度(m/s)
-* @param pwm: 输出当前PWM值
-*/
-void Chassis_GetStatus(float* target, float* actual, uint8_t* pwm)
-{
-   *target = target_speed;   // 当前设定的目标速度
-   *actual = wheel_v;            // 来自Encoder.c的实际速度
-   *pwm = current_pwm;           // 当前输出的PWM值
+ * @brief 分离速度和方向（摇杆值正负直接对应电机转向）
+ * @param speed: 轮子目标速度（带方向，来自摇杆解算）
+ * @param idx: 轮子索引
+ */
+void Split_Speed_Dir(float speed, uint8_t idx) {
+    wheel_dir[idx] = 0;
+    if (speed > 10.0f) {          // 正转阈值（防抖）
+        wheel_dir[idx] = 1;
+        wheel_target_rps[idx] = speed * (MOTOR_MAX_RPS / CODE_MAX_SPEED); // 目标转速取正值
+    } else if (speed < -10.0f) {  // 反转阈值（防抖）
+        wheel_dir[idx] = -1;
+        wheel_target_rps[idx] = fabs(speed) * (MOTOR_MAX_RPS / CODE_MAX_SPEED); // 目标转速取绝对值
+    } else {
+        wheel_target_rps[idx] = 0; // 停止
+    }
 }
 
 
 
+void Chassis_Task(uint8_t en, float vx, float vy, float vw){
+    if(en == 0){
+        for(int i=0; i<4; i++) Motor_Control(i, 0, 0);
+        return;
+    }
 
+    //运动学正解：摇杆值直接计算4个轮子的目标速度（带方向）
+    kinematics_forward(vx, vy, vw, wheel_target_rps);
+
+    //逐轮闭环控制（核心：摇杆值→方向+PWM+闭环）
+    for (int i = 0; i < 4; i++) {
+        // 3.1 分离方向和目标转速
+        Split_Speed_Dir(wheel_target_rps[i], i);
+        if (wheel_dir[i] == 0) { // 停止则跳过
+            Motor_Control(i, 0, 0);
+            continue;
+        }
+
+        // 3.2 读取当前轮子的实际转速（编码器反馈，闭环关键）
+        wheel_actual_rps[i] = rotate_v_s;
+
+        // 3.3 PID闭环计算：目标转速 vs 实际转速
+        wheel_pwm[i] = PID_Update(i, wheel_target_rps[i], wheel_actual_rps[i]);
+
+        // 3.4 控制电机：摇杆值决定的方向 + 闭环后的PWM
+        Motor_Control(i, wheel_dir[i], wheel_pwm[i]);
+    }
+
+}
+
+
+
+void Chassis_Task(uint8_t en, float vx, float vy, float vw){
+    if(en == 0){
+        for(int i=0; i<4; i++) Motor_Control(i, 0, 0);
+        return;
+    }
+
+    // 运动学解算
+    kinematics_forward(vx, vy, vw, wheel_target_rps);
+
+    for (int i = 0; i < 4; i++) {
+        Split_Speed_Dir(wheel_target_rps[i], i);
+
+        if (wheel_dir[i] == 0) {
+            Motor_Control(i, 0, 0);
+            continue;
+        }
+
+        // 开环直接输出PWM，不用PID，不卡！
+        float pwm = fabs(wheel_target_rps[i]) * MAX_PWM / CODE_MAX_SPEED;
+
+        if(pwm > MAX_PWM) pwm = MAX_PWM;
+        if(pwm < 15)  pwm = 15;  // 启动死区
+
+        Motor_Control(i, wheel_dir[i], (uint8_t)pwm);
+    }
+}
